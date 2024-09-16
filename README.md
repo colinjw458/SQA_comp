@@ -1,2 +1,1 @@
-# SQA_comp
-# SQA_comp
+# CSP implementation for SQA Alphathon 2024
