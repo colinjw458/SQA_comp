@@ -1,6 +1,6 @@
 import csp
 from csp import ts
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 @csp.node
@@ -21,4 +21,4 @@ def my_graph():
 
 
 if __name__ == '__main__':
-    csp.run(my_graph, starttime=datetime.utcnow())
+    csp.run(my_graph, starttime=datetime.now(timezone.utc))
