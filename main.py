@@ -1,24 +1,37 @@
 import csp
 from csp import ts
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import numpy as np
+import pandas as pd
 
 
 @csp.node
-def spread(bid: ts[float], ask: ts[float]) -> ts[float]:
-    if csp.valid(bid, ask):
-        return ask - bid
+def portfolio_return(open: ts[float], prior_close: ts[float]) -> ts[float]:
+    #Alarm acts as an event trigger
+    with csp.alarms():
+        event = csp.alarm(float)
+    with csp.state():
+        s_count = 0
+    #Schedules the alarm to trigger in x seconds
+    with csp.start():
+        csp.schedule_alarm(event, timedelta(seconds=1), True)
+
+    #Once triggered a new alarm must be set
+    #At endtime the graph will stop running automatically so no need to worry about infinite loops
+    if csp.ticked(event):
+        csp.schedule_alarm(event, timedelta(seconds=1), True)
+        return (open - prior_close) / prior_close
+
 
 
 @csp.graph
 def my_graph():
-    bid = csp.const(1.0)
-    ask = csp.const(2.0)
-    s = spread(bid, ask)
+    open = csp.const(1.0)
+    prior_close = csp.const(0.5)
+    port_return = portfolio_return(open, prior_close)
 
-    csp.print('spread', s)
-    csp.print('bid', bid)
-    csp.print('ask', ask)
+    csp.print('returns', port_return)
 
-
+#Change realtime to false for testing purposes
 if __name__ == '__main__':
-    csp.run(my_graph, starttime=datetime.now(timezone.utc))
+    csp.run(my_graph, starttime=datetime.now(timezone.utc), endtime=timedelta(seconds=10), realtime=True)
