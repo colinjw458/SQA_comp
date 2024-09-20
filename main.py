@@ -3,6 +3,9 @@ from csp import ts
 from datetime import datetime, timedelta, timezone
 import numpy as np
 import pandas as pd
+import adapter
+
+sim_df = pd.read_csv("Data/preview.csv")
 
 
 @csp.node
@@ -26,9 +29,11 @@ def portfolio_return(open: ts[float], prior_close: ts[float]) -> ts[float]:
 
 @csp.graph
 def my_graph():
-    open = csp.const(1.0)
-    prior_close = csp.const(0.5)
+    data = SimulaterEquityData(sim_df)
+    print(data)
     port_return = portfolio_return(open, prior_close)
+    csp.print("data", port_return)
+    
 
     csp.print('returns', port_return)
 
