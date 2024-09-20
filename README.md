@@ -1,1 +1,1 @@
-# CSP implementation for SQA Alphathon 2024
+# Realtime Machine Learning Stock Porfolio Selection
