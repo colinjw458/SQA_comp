@@ -3,6 +3,7 @@ import tensorflow as tf
 from tensorflow import keras
 from collections import deque
 import random
+import pandas as pd
 
 # Q-learning parameters
 GAMMA = 0.95
@@ -14,31 +15,30 @@ MEMORY_SIZE = 10000
 BATCH_SIZE = 32
 
 # Portfolio parameters
-INITIAL_BALANCE = 100000
 N_ACTIONS = 3  # Buy, Hold, Sell
 
 class PortfolioEnv:
-    def __init__(self, data):
+    def __init__(self, data, initial_balance):
         self.data = data
+        self.initial_balance = initial_balance
         self.reset()
 
     def reset(self):
-        self.balance = INITIAL_BALANCE
+        self.balance = self.initial_balance
         self.shares = 0
         self.current_step = 0
         return self._get_state()
 
     def step(self, action):
-        current_price = self.data.iloc[self.current_step]["price"]
+        current_price = self.data.iloc[self.current_step]["close"]
         
         if action == 0:  # Buy
-            shares_to_buy = min(self.balance // current_price, 1)  # Buy 1 share at a time
+            shares_to_buy = self.balance // current_price
             self.shares += shares_to_buy
             self.balance -= shares_to_buy * current_price
         elif action == 2:  # Sell
-            if self.shares > 0:
-                self.balance += current_price
-                self.shares -= 1
+            self.balance += self.shares * current_price
+            self.shares = 0
 
         self.current_step += 1
         done = self.current_step == len(self.data) - 1
@@ -49,14 +49,17 @@ class PortfolioEnv:
 
     def _get_state(self):
         return np.array([
-            self.balance / INITIAL_BALANCE,
-            self.shares * self.data.iloc[self.current_step]["price"] / INITIAL_BALANCE,
-            self.data.iloc[self.current_step]["returns"]
+            self.balance / self.initial_balance,
+            self.shares * self.data.iloc[self.current_step]["close"] / self.initial_balance,
+            self.data.iloc[self.current_step]["returns"] if self.current_step > 0 else 0
         ])
 
     def _calculate_reward(self):
-        portfolio_value = self.balance + self.shares * self.data.iloc[self.current_step]["price"]
-        return (portfolio_value - INITIAL_BALANCE) / INITIAL_BALANCE
+        portfolio_value = self.get_portfolio_value()
+        return (portfolio_value - self.initial_balance) / self.initial_balance
+
+    def get_portfolio_value(self):
+        return self.balance + self.shares * self.data.iloc[self.current_step]["close"]
 
 class DQNAgent:
     def __init__(self, state_size, action_size):
