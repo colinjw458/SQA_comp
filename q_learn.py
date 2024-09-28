@@ -30,6 +30,9 @@ class PortfolioEnv:
         return self._get_state()
 
     def step(self, action):
+        if self.current_step >= len(self.data) - 1:
+            return self._get_state(), 0, True
+
         current_price = self.data.iloc[self.current_step]["close"]
         
         if action == 0:  # Buy
@@ -41,13 +44,21 @@ class PortfolioEnv:
             self.shares = 0
 
         self.current_step += 1
-        done = self.current_step == len(self.data) - 1
         next_state = self._get_state()
         reward = self._calculate_reward()
+        done = self.current_step == len(self.data) - 1
         
         return next_state, reward, done
 
     def _get_state(self):
+        if self.current_step >= len(self.data):
+            # If we've run out of data, return the last known state
+            return np.array([
+                self.balance / self.initial_balance,
+                0,  # No shares value since we're out of data
+                0   # No returns since we're out of data
+            ])
+
         return np.array([
             self.balance / self.initial_balance,
             self.shares * self.data.iloc[self.current_step]["close"] / self.initial_balance,
@@ -55,10 +66,16 @@ class PortfolioEnv:
         ])
 
     def _calculate_reward(self):
+        if self.current_step >= len(self.data):
+            return 0  # No reward if we're out of data
+
         portfolio_value = self.get_portfolio_value()
         return (portfolio_value - self.initial_balance) / self.initial_balance
 
     def get_portfolio_value(self):
+        if self.current_step >= len(self.data):
+            return self.balance  # Only return balance if we're out of data
+
         return self.balance + self.shares * self.data.iloc[self.current_step]["close"]
 
 class DQNAgent:
