@@ -6,6 +6,9 @@ from datetime import timedelta
 from q_learn import PortfolioEnv, DQNAgent, BATCH_SIZE
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+import warnings
+
+warnings.filterwarnings("ignore", message="Not memoizing output of.*: unhashable type: 'numpy.ndarray'")
 
 # Read the CSV file
 sim_df = pd.read_csv("his_short.csv")
@@ -35,8 +38,8 @@ portfolio2 = create_portfolio()
 # Initialize environments and agents for each symbol in each portfolio
 envs1 = {symbol: PortfolioEnv(sim_df[sim_df["symbol"] == symbol], INITIAL_BALANCE * portfolio1[symbol]) for symbol in symbols}
 envs2 = {symbol: PortfolioEnv(sim_df[sim_df["symbol"] == symbol], INITIAL_BALANCE * portfolio2[symbol]) for symbol in symbols}
-agents1 = {symbol: DQNAgent(state_size=3, action_size=3) for symbol in symbols}
-agents2 = {symbol: DQNAgent(state_size=3, action_size=3) for symbol in symbols}
+agents1 = {symbol: DQNAgent(state_size=4, action_size=5) for symbol in symbols}
+agents2 = {symbol: DQNAgent(state_size=4, action_size=5) for symbol in symbols}
 
 # Prepare data for CSP curves
 prices_data = []
@@ -113,8 +116,6 @@ def plot_results(results):
     plt.show()
 
 if __name__ == "__main__":
-    # Create a progress bar
-
     results = csp.run(
         portfolio_manager_graph,
         starttime=timestamps[0],
@@ -141,3 +142,13 @@ if __name__ == "__main__":
             weights = portfolio1 if portfolio == "portfolio1" else portfolio2
             for symbol, weight in weights.items():
                 print(f"  {symbol}: {weight:.2%}")
+
+    # Calculate and print Sharpe ratios
+    risk_free_rate = 0.02  # Assume 2% risk-free rate
+    for portfolio, values in results.items():
+        if portfolio != "progress":
+            portfolio_values = [v[1] for v in values]
+            returns = np.diff(portfolio_values) / portfolio_values[:-1]
+            excess_returns = returns - risk_free_rate / 252  # Daily excess returns
+            sharpe_ratio = np.sqrt(252) * np.mean(excess_returns) / np.std(excess_returns)
+            print(f"\n{portfolio} Sharpe Ratio: {sharpe_ratio:.4f}")
