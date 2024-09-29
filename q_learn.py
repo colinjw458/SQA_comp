@@ -114,46 +114,10 @@ class DQNAgent:
         self.epsilon = EPSILON
         self.model = self._build_model()
 
-        # Implement a warm-up period to pre-fill the buffer before training begins
-        WARMUP_PERIOD = 100  # Number of steps to fill the buffer with random actions before training
-        INITIAL_BATCH_SIZE = 16  # Start with a smaller batch size and increase it later
-        
-        # Check if we're still in the warm-up phase
-        if len(self.memory) < WARMUP_PERIOD:
-            return  # Skip training during the warm-up phase
-        
-        # Dynamically adjust batch size based on buffer size
-        current_batch_size = min(BATCH_SIZE, len(self.memory))  # Use a smaller batch if the buffer isn't full yet
-        
-        # Sample a batch of experiences from the replay buffer
-        batch = random.sample(self.memory, current_batch_size)
-
-        # Process the batch for Q-learning updates
-        state_batch = np.array([state for state, _, _, _, _ in batch])
-        next_state_batch = np.array([next_state for _, _, _, next_state, _ in batch])
-        action_batch = np.array([action for _, action, _, _, _ in batch])
-        reward_batch = np.array([reward for _, _, reward, _, _ in batch])
-        done_batch = np.array([done for _, _, _, _, done in batch])
-
-        # Predict Q-values for current states and next states
-        current_qs_batch = self.model.predict(state_batch, batch_size=current_batch_size)
-        next_qs_batch = self.model.predict(next_state_batch, batch_size=current_batch_size)
-
-        # Vectorized update of Q-values
-        target_qs_batch = reward_batch + GAMMA * np.amax(next_qs_batch, axis=1) * (1 - done_batch)
-
-        # Update target values for the actions taken
-        for i in range(current_batch_size):
-            current_qs_batch[i][action_batch[i]] = target_qs_batch[i]
-
-        # Train the model on the updated Q-values
-        self.model.train_on_batch(state_batch, current_qs_batch)
-
-
     def _build_model(self):
         model = keras.Sequential([
             keras.layers.Input(shape=(self.state_size,)),
-            keras.layers.Dense(64, input_dim=self.state_size, activation='relu'),
+            keras.layers.Dense(64, activation='relu'),
             keras.layers.Dense(64, activation='relu'),
             keras.layers.Dense(self.action_size, activation='linear')
         ])

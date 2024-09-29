@@ -7,11 +7,7 @@ from q_learn import PortfolioEnv, DQNAgent, BATCH_SIZE
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import warnings
-from scipy import stats
-import os
 
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 warnings.filterwarnings("ignore", message="Not memoizing output of.*: unhashable type: 'numpy.ndarray'")
 
 # Read the CSV file
@@ -35,6 +31,9 @@ timestamps = sim_df["ts_event"].unique()
 
 # Initial balance for each portfolio
 INITIAL_BALANCE = 10000
+
+# Set the number of steps for training (easily changeable)
+TRAINING_STEPS = 150
 
 # Create two portfolios with random weights
 def create_portfolio():
@@ -62,8 +61,17 @@ for timestamp in timestamps:
 total_steps = len(timestamps)
 progress_bar = tqdm(total=total_steps, desc="Simulation Progress", unit="step")
 
+# Global variables
+current_step = 0
+is_training = True
+best_portfolio = None
+best_envs = None
+best_agents = None
+
 @csp.node
 def update_portfolio(prices: ts[np.ndarray], returns: ts[np.ndarray], portfolio: dict, envs: dict, agents: dict) -> ts[float]:
+    global current_step, is_training
+    
     current_values = {symbol: envs[symbol].get_portfolio_value() for symbol in symbols}
 
     if csp.ticked(prices):
@@ -77,13 +85,23 @@ def update_portfolio(prices: ts[np.ndarray], returns: ts[np.ndarray], portfolio:
                 state = env._get_state()
                 action = agent.act(state)
                 next_state, reward, done = env.step(action, price_array[i], returns_array[i])
-                agent.remember(state, action, reward, next_state, done)
-                if len(agent.memory) > BATCH_SIZE:
-                    agent.replay(BATCH_SIZE)
+                
+                if is_training:
+                    agent.remember(state, action, reward, next_state, done)
+                    if len(agent.memory) > BATCH_SIZE:
+                        agent.replay(BATCH_SIZE)
+                else:
+                    # During testing, we use a greedy policy but don't reset epsilon immediately
+                    agent.epsilon = max(agent.epsilon * 0.99, 0.01)  # Gradually reduce epsilon
                 
                 current_values[symbol] = env.get_portfolio_value()
 
         total_value = sum(current_values.values())
+        current_step += 1
+        
+        if current_step == TRAINING_STEPS:
+            is_training = False
+
         return total_value
     
     return sum(current_values.values())
@@ -102,38 +120,27 @@ def portfolio_manager_graph():
     # Create a ticker for progress updates
     progress_ticker = csp.timer(timedelta(seconds=1))
 
+    # Update both portfolios throughout the entire simulation
     portfolio1_value = update_portfolio(prices, returns, portfolio1, envs1, agents1)
     portfolio2_value = update_portfolio(prices, returns, portfolio2, envs2, agents2)
+    
+    csp.add_graph_output("portfolio1_value", portfolio1_value)
+    csp.add_graph_output("portfolio2_value", portfolio2_value)
 
-    # Add progress update node
+    # Add progress update
     progress_update = update_progress(progress_ticker)
-
-    csp.add_graph_output("portfolio1", portfolio1_value)
-    csp.add_graph_output("portfolio2", portfolio2_value)
     csp.add_graph_output("progress", progress_update)
 
-def plot_results(results):
-    plt.figure(figsize=(12, 6))
-    for portfolio, values in results.items():
-        if portfolio != "progress":  # Skip plotting progress data
-            times = [v[0] for v in values]
-            portfolio_values = [v[1] for v in values]
-            
-            # Apply z-score normalization
-            z_scores = np.abs(stats.zscore(portfolio_values))
-            filtered_values = [value for value, z in zip(portfolio_values, z_scores) if z < 3]
-            
-            plt.plot(times[:len(filtered_values)], filtered_values, label=portfolio)
+def run_simulation():
+    global current_step, is_training, best_portfolio, best_envs, best_agents
     
-    plt.title("Portfolio Performance Comparison (Outliers Removed)")
-    plt.xlabel("Time")
-    plt.ylabel("Portfolio Value ($)")
-    plt.legend()
-    plt.grid(True)
-    plt.show()
+    # Reset global variables
+    current_step = 0
+    is_training = True
+    best_portfolio = None
+    best_envs = None
+    best_agents = None
 
-
-if __name__ == "__main__":
     results = csp.run(
         portfolio_manager_graph,
         starttime=timestamps[0],
@@ -141,32 +148,71 @@ if __name__ == "__main__":
         realtime=False
     )
     
+    # Determine the best portfolio based on training results
+    train_value1 = results["portfolio1_value"][TRAINING_STEPS-1][1]
+    train_value2 = results["portfolio2_value"][TRAINING_STEPS-1][1]
+    
+    if train_value1 > train_value2:
+        best_portfolio_name = "Portfolio 1"
+    else:
+        best_portfolio_name = "Portfolio 2"
+    
+    return results, best_portfolio_name
+
+def plot_results(results, best_portfolio_name):
+    plt.figure(figsize=(12, 6))
+    
+    # Plot full results for both portfolios
+    plt.plot(timestamps, [v[1] for v in results["portfolio1_value"]], label="Portfolio 1", alpha=0.7)
+    plt.plot(timestamps, [v[1] for v in results["portfolio2_value"]], label="Portfolio 2", alpha=0.7)
+    
+    # Highlight the chosen portfolio for testing phase
+    if best_portfolio_name == "Portfolio 1":
+        test_values = [v[1] for v in results["portfolio1_value"][TRAINING_STEPS:]]
+    else:
+        test_values = [v[1] for v in results["portfolio2_value"][TRAINING_STEPS:]]
+    
+    plt.plot(timestamps[TRAINING_STEPS:], test_values, label=f"{best_portfolio_name} (Testing)", linewidth=2)
+
+    plt.axvline(x=timestamps[TRAINING_STEPS], color='r', linestyle='--', label='Train/Test Split')
+
+    plt.title("Portfolio Performance (Training and Testing Phases)")
+    plt.xlabel("Time")
+    plt.ylabel("Portfolio Value ($)")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+if __name__ == "__main__":
+    results, best_portfolio_name = run_simulation()
+    
     # Close the progress bar
     progress_bar.close()
 
-    # Plot results with outliers removed
-    plot_results(results)
+    # Plot results
+    plot_results(results, best_portfolio_name)
 
     # Print final portfolio values and returns
-    print("\nInitial Investment for each portfolio: ${:.2f}".format(INITIAL_BALANCE))
-    for portfolio, values in results.items():
-        if portfolio != "progress":  # Skip printing progress data
-            final_value = values[-1][1]
-            total_return = (final_value - INITIAL_BALANCE) / INITIAL_BALANCE
-            print(f"\n{portfolio}:")
-            print(f"Final Value: ${final_value:.2f}")
-            print(f"Total Return: {total_return:.2%}")
-            print("Weights:")
-            weights = portfolio1 if portfolio == "portfolio1" else portfolio2
-            for symbol, weight in weights.items():
-                print(f"  {symbol}: {weight:.2%}")
+    print("\nInitial Investment: ${:.2f}".format(INITIAL_BALANCE))
+    
+    if best_portfolio_name == "Portfolio 1":
+        test_values = [v[1] for v in results["portfolio1_value"][TRAINING_STEPS:]]
+    else:
+        test_values = [v[1] for v in results["portfolio2_value"][TRAINING_STEPS:]]
 
-    # Calculate and print Sharpe ratios
+    final_value = test_values[-1]
+    total_return = (final_value - INITIAL_BALANCE) / INITIAL_BALANCE
+    
+    print(f"\nTesting Results:")
+    print(f"Final Value: ${final_value:.2f}")
+    print(f"Total Return: {total_return:.2%}")
+
+    # Calculate and print Sharpe ratio for the testing phase
     risk_free_rate = 0.02  # Assume 2% risk-free rate
-    for portfolio, values in results.items():
-        if portfolio != "progress":
-            portfolio_values = [v[1] for v in values]
-            returns = np.diff(portfolio_values) / portfolio_values[:-1]
-            excess_returns = returns - risk_free_rate / 252  # Daily excess returns
-            sharpe_ratio = np.sqrt(252) * np.mean(excess_returns) / np.std(excess_returns)
-            print(f"\n{portfolio} Sharpe Ratio: {sharpe_ratio:.4f}")
+    returns = np.diff(test_values) / test_values[:-1]
+    excess_returns = returns - risk_free_rate / 252  # Daily excess returns
+    sharpe_ratio = np.sqrt(252) * np.mean(excess_returns) / np.std(excess_returns)
+    print(f"\nSharpe Ratio (Testing Phase): {sharpe_ratio:.4f}")
+
+    # Print which portfolio was selected for testing
+    print(f"\nBest performing portfolio selected for testing: {best_portfolio_name}")
