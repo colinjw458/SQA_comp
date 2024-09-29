@@ -4,9 +4,6 @@ from tensorflow import keras
 from collections import deque
 import random
 import pandas as pd
-import os
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # Q-learning parameters
 GAMMA = 0.95
@@ -33,11 +30,9 @@ class PortfolioEnv:
         self.portfolio_values = [self.initial_balance]
         return self._get_state()
 
-    def step(self, action):
+    def step(self, action, current_price, current_return):
         if self.current_step >= len(self.data) - 1:
             return self._get_state(), 0, True
-
-        current_price = self.data.iloc[self.current_step]["close"]
         
         if action == 0:  # Sell All
             self.balance += self.shares * current_price
@@ -57,35 +52,29 @@ class PortfolioEnv:
             self.balance -= shares_to_buy * current_price
 
         self.current_step += 1
-        next_state = self._get_state()
-        reward = self._calculate_reward()
+        next_state = self._get_state(current_price, current_return)
+        reward = self._calculate_reward(current_price)
         done = self.current_step == len(self.data) - 1
         
-        self.portfolio_values.append(self.get_portfolio_value())
+        self.portfolio_values.append(self.get_portfolio_value(current_price))
         
         return next_state, reward, done
 
-    def _get_state(self):
-        if self.current_step >= len(self.data):
-            return np.array([
-                self.balance / self.initial_balance,
-                0,
-                0,
-                0
-            ])
+    def _get_state(self, current_price=None, current_return=None):
+        if current_price is None:
+            current_price = self.data.iloc[self.current_step]["close"]
+        if current_return is None:
+            current_return = self.data.iloc[self.current_step]["returns"] if self.current_step > 0 else 0
 
         return np.array([
             self.balance / self.initial_balance,
-            self.shares * self.data.iloc[self.current_step]["close"] / self.initial_balance,
-            self.data.iloc[self.current_step]["returns"] if self.current_step > 0 else 0,
+            self.shares * current_price / self.initial_balance,
+            current_return,
             self._calculate_sharpe_ratio()
         ])
 
-    def _calculate_reward(self):
-        if self.current_step >= len(self.data):
-            return 0
-
-        portfolio_return = (self.get_portfolio_value() - self.initial_balance) / self.initial_balance
+    def _calculate_reward(self, current_price):
+        portfolio_return = (self.get_portfolio_value(current_price) - self.initial_balance) / self.initial_balance
         sharpe_ratio = self._calculate_sharpe_ratio()
         
         # Combine portfolio return and Sharpe ratio in the reward
@@ -110,11 +99,12 @@ class PortfolioEnv:
         sharpe_ratio = np.sqrt(252) * average_return / return_std  # Annualized Sharpe ratio
         return sharpe_ratio
 
-    def get_portfolio_value(self):
-        if self.current_step >= len(self.data):
-            return self.balance
-
-        return self.balance + self.shares * self.data.iloc[self.current_step]["close"]
+    def get_portfolio_value(self, current_price=None):
+        if current_price is None:
+            if self.current_step >= len(self.data):
+                return self.balance
+            current_price = self.data.iloc[self.current_step]["close"]
+        return self.balance + self.shares * current_price
 
 class DQNAgent:
     def __init__(self, state_size, action_size):
@@ -123,6 +113,42 @@ class DQNAgent:
         self.memory = deque(maxlen=MEMORY_SIZE)
         self.epsilon = EPSILON
         self.model = self._build_model()
+
+        # Implement a warm-up period to pre-fill the buffer before training begins
+        WARMUP_PERIOD = 100  # Number of steps to fill the buffer with random actions before training
+        INITIAL_BATCH_SIZE = 16  # Start with a smaller batch size and increase it later
+        
+        # Check if we're still in the warm-up phase
+        if len(self.memory) < WARMUP_PERIOD:
+            return  # Skip training during the warm-up phase
+        
+        # Dynamically adjust batch size based on buffer size
+        current_batch_size = min(BATCH_SIZE, len(self.memory))  # Use a smaller batch if the buffer isn't full yet
+        
+        # Sample a batch of experiences from the replay buffer
+        batch = random.sample(self.memory, current_batch_size)
+
+        # Process the batch for Q-learning updates
+        state_batch = np.array([state for state, _, _, _, _ in batch])
+        next_state_batch = np.array([next_state for _, _, _, next_state, _ in batch])
+        action_batch = np.array([action for _, action, _, _, _ in batch])
+        reward_batch = np.array([reward for _, _, reward, _, _ in batch])
+        done_batch = np.array([done for _, _, _, _, done in batch])
+
+        # Predict Q-values for current states and next states
+        current_qs_batch = self.model.predict(state_batch, batch_size=current_batch_size)
+        next_qs_batch = self.model.predict(next_state_batch, batch_size=current_batch_size)
+
+        # Vectorized update of Q-values
+        target_qs_batch = reward_batch + GAMMA * np.amax(next_qs_batch, axis=1) * (1 - done_batch)
+
+        # Update target values for the actions taken
+        for i in range(current_batch_size):
+            current_qs_batch[i][action_batch[i]] = target_qs_batch[i]
+
+        # Train the model on the updated Q-values
+        self.model.train_on_batch(state_batch, current_qs_batch)
+
 
     def _build_model(self):
         model = keras.Sequential([

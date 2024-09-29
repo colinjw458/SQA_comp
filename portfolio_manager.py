@@ -7,17 +7,26 @@ from q_learn import PortfolioEnv, DQNAgent, BATCH_SIZE
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import warnings
+from scipy import stats
+import os
 
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 warnings.filterwarnings("ignore", message="Not memoizing output of.*: unhashable type: 'numpy.ndarray'")
 
 # Read the CSV file
-sim_df = pd.read_csv("his_short.csv")
+sim_df = pd.read_csv("his_short.csv", low_memory=False)
+
+# Use categorical data types where possible to reduce memory usage
+sim_df["symbol"] = sim_df["symbol"].astype("category")
+sim_df["publisher_id"] = sim_df["publisher_id"].astype("category")
+sim_df["instrument_id"] = sim_df["instrument_id"].astype("category")
 
 # Convert ts_event to datetime and sort
-sim_df["ts_event"] = pd.to_datetime(sim_df["ts_event"])
+sim_df["ts_event"] = pd.to_datetime(sim_df["ts_event"], errors="coerce", infer_datetime_format=True)
 sim_df = sim_df.sort_values("ts_event")
 
-# Calculate returns
+# Calculate returns for each stock separately
 sim_df["returns"] = sim_df.groupby("symbol")["close"].pct_change()
 
 # Get unique symbols and timestamps
@@ -55,7 +64,7 @@ progress_bar = tqdm(total=total_steps, desc="Simulation Progress", unit="step")
 
 @csp.node
 def update_portfolio(prices: ts[np.ndarray], returns: ts[np.ndarray], portfolio: dict, envs: dict, agents: dict) -> ts[float]:
-    current_values = {symbol: INITIAL_BALANCE * weight for symbol, weight in portfolio.items()}
+    current_values = {symbol: envs[symbol].get_portfolio_value() for symbol in symbols}
 
     if csp.ticked(prices):
         price_array = prices
@@ -67,7 +76,7 @@ def update_portfolio(prices: ts[np.ndarray], returns: ts[np.ndarray], portfolio:
                 
                 state = env._get_state()
                 action = agent.act(state)
-                next_state, reward, done = env.step(action)
+                next_state, reward, done = env.step(action, price_array[i], returns_array[i])
                 agent.remember(state, action, reward, next_state, done)
                 if len(agent.memory) > BATCH_SIZE:
                     agent.replay(BATCH_SIZE)
@@ -107,13 +116,22 @@ def plot_results(results):
     plt.figure(figsize=(12, 6))
     for portfolio, values in results.items():
         if portfolio != "progress":  # Skip plotting progress data
-            plt.plot([v[0] for v in values], [v[1] for v in values], label=portfolio)
-    plt.title("Portfolio Performance Comparison")
+            times = [v[0] for v in values]
+            portfolio_values = [v[1] for v in values]
+            
+            # Apply z-score normalization
+            z_scores = np.abs(stats.zscore(portfolio_values))
+            filtered_values = [value for value, z in zip(portfolio_values, z_scores) if z < 3]
+            
+            plt.plot(times[:len(filtered_values)], filtered_values, label=portfolio)
+    
+    plt.title("Portfolio Performance Comparison (Outliers Removed)")
     plt.xlabel("Time")
     plt.ylabel("Portfolio Value ($)")
     plt.legend()
     plt.grid(True)
     plt.show()
+
 
 if __name__ == "__main__":
     results = csp.run(
@@ -126,7 +144,7 @@ if __name__ == "__main__":
     # Close the progress bar
     progress_bar.close()
 
-    # Plot results
+    # Plot results with outliers removed
     plot_results(results)
 
     # Print final portfolio values and returns
