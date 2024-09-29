@@ -110,8 +110,12 @@ Follow these steps to set up and run the portfolio_manager.py file:
 ## Contributors
 
 Colin White:
+
 https://github.com/colinjw458
+
 https://www.linkedin.com/in/colin-white-b66413189/
 
+
 Mackenzie Qu:
+
 https://github.com/mackenziequ
