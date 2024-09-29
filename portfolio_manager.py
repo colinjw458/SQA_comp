@@ -33,21 +33,24 @@ timestamps = sim_df["ts_event"].unique()
 INITIAL_BALANCE = 10000
 
 # Set the number of steps for training (easily changeable)
-TRAINING_STEPS = 150
+TRAINING_STEPS = 50
 
-# Create two portfolios with random weights
+# Create three portfolios with random weights
 def create_portfolio():
     weights = np.random.dirichlet(np.ones(len(symbols)))
     return dict(zip(symbols, weights))
 
 portfolio1 = create_portfolio()
 portfolio2 = create_portfolio()
+portfolio3 = create_portfolio()
 
 # Initialize environments and agents for each symbol in each portfolio
 envs1 = {symbol: PortfolioEnv(sim_df[sim_df["symbol"] == symbol], INITIAL_BALANCE * portfolio1[symbol]) for symbol in symbols}
 envs2 = {symbol: PortfolioEnv(sim_df[sim_df["symbol"] == symbol], INITIAL_BALANCE * portfolio2[symbol]) for symbol in symbols}
+envs3 = {symbol: PortfolioEnv(sim_df[sim_df["symbol"] == symbol], INITIAL_BALANCE * portfolio3[symbol]) for symbol in symbols}
 agents1 = {symbol: DQNAgent(state_size=4, action_size=5) for symbol in symbols}
 agents2 = {symbol: DQNAgent(state_size=4, action_size=5) for symbol in symbols}
+agents3 = {symbol: DQNAgent(state_size=4, action_size=5) for symbol in symbols}
 
 # Prepare data for CSP curves
 prices_data = []
@@ -70,7 +73,7 @@ best_agents = None
 
 @csp.node
 def update_portfolio(prices: ts[np.ndarray], returns: ts[np.ndarray], portfolio: dict, envs: dict, agents: dict) -> ts[float]:
-    global current_step, is_training
+    global current_step, is_training, best_portfolio, best_envs, best_agents
     
     current_values = {symbol: envs[symbol].get_portfolio_value() for symbol in symbols}
 
@@ -90,7 +93,7 @@ def update_portfolio(prices: ts[np.ndarray], returns: ts[np.ndarray], portfolio:
                     agent.remember(state, action, reward, next_state, done)
                     if len(agent.memory) > BATCH_SIZE:
                         agent.replay(BATCH_SIZE)
-                else:
+                elif portfolio == best_portfolio:
                     # During testing, we use a greedy policy but don't reset epsilon immediately
                     agent.epsilon = max(agent.epsilon * 0.99, 0.01)  # Gradually reduce epsilon
                 
@@ -120,12 +123,14 @@ def portfolio_manager_graph():
     # Create a ticker for progress updates
     progress_ticker = csp.timer(timedelta(seconds=1))
 
-    # Update both portfolios throughout the entire simulation
+    # Update all portfolios throughout the entire simulation
     portfolio1_value = update_portfolio(prices, returns, portfolio1, envs1, agents1)
     portfolio2_value = update_portfolio(prices, returns, portfolio2, envs2, agents2)
+    portfolio3_value = update_portfolio(prices, returns, portfolio3, envs3, agents3)
     
     csp.add_graph_output("portfolio1_value", portfolio1_value)
     csp.add_graph_output("portfolio2_value", portfolio2_value)
+    csp.add_graph_output("portfolio3_value", portfolio3_value)
 
     # Add progress update
     progress_update = update_progress(progress_ticker)
@@ -151,26 +156,36 @@ def run_simulation():
     # Determine the best portfolio based on training results
     train_value1 = results["portfolio1_value"][TRAINING_STEPS-1][1]
     train_value2 = results["portfolio2_value"][TRAINING_STEPS-1][1]
+    train_value3 = results["portfolio3_value"][TRAINING_STEPS-1][1]
     
-    if train_value1 > train_value2:
+    best_value = max(train_value1, train_value2, train_value3)
+    if best_value == train_value1:
         best_portfolio_name = "Portfolio 1"
-    else:
+        best_portfolio, best_envs, best_agents = portfolio1, envs1, agents1
+    elif best_value == train_value2:
         best_portfolio_name = "Portfolio 2"
+        best_portfolio, best_envs, best_agents = portfolio2, envs2, agents2
+    else:
+        best_portfolio_name = "Portfolio 3"
+        best_portfolio, best_envs, best_agents = portfolio3, envs3, agents3
     
     return results, best_portfolio_name
 
 def plot_results(results, best_portfolio_name):
     plt.figure(figsize=(12, 6))
     
-    # Plot full results for both portfolios
-    plt.plot(timestamps, [v[1] for v in results["portfolio1_value"]], label="Portfolio 1", alpha=0.7)
-    plt.plot(timestamps, [v[1] for v in results["portfolio2_value"]], label="Portfolio 2", alpha=0.7)
+    # Plot full results for all portfolios during training
+    plt.plot(timestamps[:TRAINING_STEPS], [v[1] for v in results["portfolio1_value"][:TRAINING_STEPS]], label="Portfolio 1 (Training)", alpha=0.7)
+    plt.plot(timestamps[:TRAINING_STEPS], [v[1] for v in results["portfolio2_value"][:TRAINING_STEPS]], label="Portfolio 2 (Training)", alpha=0.7)
+    plt.plot(timestamps[:TRAINING_STEPS], [v[1] for v in results["portfolio3_value"][:TRAINING_STEPS]], label="Portfolio 3 (Training)", alpha=0.7)
     
-    # Highlight the chosen portfolio for testing phase
+    # Plot only the best portfolio for testing phase
     if best_portfolio_name == "Portfolio 1":
         test_values = [v[1] for v in results["portfolio1_value"][TRAINING_STEPS:]]
-    else:
+    elif best_portfolio_name == "Portfolio 2":
         test_values = [v[1] for v in results["portfolio2_value"][TRAINING_STEPS:]]
+    else:
+        test_values = [v[1] for v in results["portfolio3_value"][TRAINING_STEPS:]]
     
     plt.plot(timestamps[TRAINING_STEPS:], test_values, label=f"{best_portfolio_name} (Testing)", linewidth=2)
 
@@ -197,8 +212,10 @@ if __name__ == "__main__":
     
     if best_portfolio_name == "Portfolio 1":
         test_values = [v[1] for v in results["portfolio1_value"][TRAINING_STEPS:]]
-    else:
+    elif best_portfolio_name == "Portfolio 2":
         test_values = [v[1] for v in results["portfolio2_value"][TRAINING_STEPS:]]
+    else:
+        test_values = [v[1] for v in results["portfolio3_value"][TRAINING_STEPS:]]
 
     final_value = test_values[-1]
     total_return = (final_value - INITIAL_BALANCE) / INITIAL_BALANCE
