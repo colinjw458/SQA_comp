@@ -11,7 +11,7 @@ import warnings
 warnings.filterwarnings("ignore", message="Not memoizing output of.*: unhashable type: 'numpy.ndarray'")
 
 # Read the CSV file
-sim_df = pd.read_csv("his_short.csv", low_memory=False)
+sim_df = pd.read_csv("HistoricalEquityData.csv", low_memory=False)
 
 # Use categorical data types where possible to reduce memory usage
 sim_df["symbol"] = sim_df["symbol"].astype("category")
@@ -32,32 +32,37 @@ timestamps = sim_df["ts_event"].unique()
 # Initial balance for each portfolio
 INITIAL_BALANCE = 10000
 
-# Set the number of steps for training (easily changeable)
-TRAINING_STEPS = 50
+# Set the number of steps for training 
+TRAINING_STEPS = 500
 
-# Create three portfolios with random weights
-def create_portfolio():
-    weights = np.random.dirichlet(np.ones(len(symbols)))
-    return dict(zip(symbols, weights))
+# Create three environments with random initial weights
+env1 = PortfolioEnv(sim_df, INITIAL_BALANCE, symbols)
+env2 = PortfolioEnv(sim_df, INITIAL_BALANCE, symbols)
+env3 = PortfolioEnv(sim_df, INITIAL_BALANCE, symbols)
 
-portfolio1 = create_portfolio()
-portfolio2 = create_portfolio()
-portfolio3 = create_portfolio()
-
-# Initialize environments and agents for each symbol in each portfolio
-envs1 = {symbol: PortfolioEnv(sim_df[sim_df["symbol"] == symbol], INITIAL_BALANCE * portfolio1[symbol]) for symbol in symbols}
-envs2 = {symbol: PortfolioEnv(sim_df[sim_df["symbol"] == symbol], INITIAL_BALANCE * portfolio2[symbol]) for symbol in symbols}
-envs3 = {symbol: PortfolioEnv(sim_df[sim_df["symbol"] == symbol], INITIAL_BALANCE * portfolio3[symbol]) for symbol in symbols}
-agents1 = {symbol: DQNAgent(state_size=4, action_size=5) for symbol in symbols}
-agents2 = {symbol: DQNAgent(state_size=4, action_size=5) for symbol in symbols}
-agents3 = {symbol: DQNAgent(state_size=4, action_size=5) for symbol in symbols}
+# Create agents for each environment
+state_size = 3 * len(symbols) + 1  # 3 features per stock + 1 for Sharpe ratio
+action_size = 5
+agent1 = DQNAgent(state_size, action_size, len(symbols))
+agent2 = DQNAgent(state_size, action_size, len(symbols))
+agent3 = DQNAgent(state_size, action_size, len(symbols))
 
 # Prepare data for CSP curves
 prices_data = []
 returns_data = []
 for timestamp in timestamps:
-    price_array = np.array([sim_df[(sim_df["ts_event"] == timestamp) & (sim_df["symbol"] == symbol)]["close"].values[0] if len(sim_df[(sim_df["ts_event"] == timestamp) & (sim_df["symbol"] == symbol)]) > 0 else np.nan for symbol in symbols])
-    returns_array = np.array([sim_df[(sim_df["ts_event"] == timestamp) & (sim_df["symbol"] == symbol)]["returns"].values[0] if len(sim_df[(sim_df["ts_event"] == timestamp) & (sim_df["symbol"] == symbol)]) > 0 else np.nan for symbol in symbols])
+    price_array = np.array([
+        sim_df[(sim_df["ts_event"] == timestamp) & (sim_df["symbol"] == symbol)]["close"].values[0]
+        if len(sim_df[(sim_df["ts_event"] == timestamp) & (sim_df["symbol"] == symbol)]) > 0
+        else np.nan
+        for symbol in symbols
+    ])
+    returns_array = np.array([
+        sim_df[(sim_df["ts_event"] == timestamp) & (sim_df["symbol"] == symbol)]["returns"].values[0]
+        if len(sim_df[(sim_df["ts_event"] == timestamp) & (sim_df["symbol"] == symbol)]) > 0
+        else np.nan
+        for symbol in symbols
+    ])
     prices_data.append((timestamp, price_array))
     returns_data.append((timestamp, returns_array))
 
@@ -67,47 +72,43 @@ progress_bar = tqdm(total=total_steps, desc="Simulation Progress", unit="step")
 # Global variables
 current_step = 0
 is_training = True
-best_portfolio = None
-best_envs = None
-best_agents = None
+best_env = None
+best_agent = None
 
 @csp.node
-def update_portfolio(prices: ts[np.ndarray], returns: ts[np.ndarray], portfolio: dict, envs: dict, agents: dict) -> ts[float]:
-    global current_step, is_training, best_portfolio, best_envs, best_agents
+def update_portfolio(prices: ts[np.ndarray], returns: ts[np.ndarray], env: PortfolioEnv, agent: DQNAgent) -> ts[float]:
+    global current_step, is_training, best_env, best_agent
     
-    current_values = {symbol: envs[symbol].get_portfolio_value() for symbol in symbols}
-
     if csp.ticked(prices):
         price_array = prices
         returns_array = returns
-        for i, symbol in enumerate(symbols):
-            if not np.isnan(price_array[i]):
-                env = envs[symbol]
-                agent = agents[symbol]
-                
-                state = env._get_state()
-                action = agent.act(state)
-                next_state, reward, done = env.step(action, price_array[i], returns_array[i])
-                
-                if is_training:
-                    agent.remember(state, action, reward, next_state, done)
-                    if len(agent.memory) > BATCH_SIZE:
-                        agent.replay(BATCH_SIZE)
-                elif portfolio == best_portfolio:
-                    # During testing, we use a greedy policy but don't reset epsilon immediately
-                    agent.epsilon = max(agent.epsilon * 0.99, 0.01)  # Gradually reduce epsilon
-                
-                current_values[symbol] = env.get_portfolio_value()
-
-        total_value = sum(current_values.values())
-        current_step += 1
         
-        if current_step == TRAINING_STEPS:
-            is_training = False
+        env.update_prices(price_array)  # Update the latest prices in the environment
+        
+        if not env.initialized and not np.isnan(price_array).all():
+            env.initialize_portfolio(price_array)
+            return env.get_portfolio_value()
 
-        return total_value
+        if env.initialized:
+            state = env._get_state(price_array, returns_array)
+            action = agent.act(state)
+            next_state, reward, done = env.step(action, price_array, returns_array)
+            
+            if is_training:
+                agent.remember(state, action, reward, next_state, done)
+                if len(agent.memory) > BATCH_SIZE:
+                    agent.replay(BATCH_SIZE)
+            elif env == best_env:
+                agent.epsilon = max(agent.epsilon * 0.99, 0.01)  # Gradually reduce epsilon
+            
+            current_step += 1
+            
+            if current_step == TRAINING_STEPS:
+                is_training = False
+
+        return env.get_portfolio_value()
     
-    return sum(current_values.values())
+    return env.get_portfolio_value()
 
 @csp.node
 def update_progress(trigger: ts[bool]) -> ts[None]:
@@ -124,9 +125,9 @@ def portfolio_manager_graph():
     progress_ticker = csp.timer(timedelta(seconds=1))
 
     # Update all portfolios throughout the entire simulation
-    portfolio1_value = update_portfolio(prices, returns, portfolio1, envs1, agents1)
-    portfolio2_value = update_portfolio(prices, returns, portfolio2, envs2, agents2)
-    portfolio3_value = update_portfolio(prices, returns, portfolio3, envs3, agents3)
+    portfolio1_value = update_portfolio(prices, returns, env1, agent1)
+    portfolio2_value = update_portfolio(prices, returns, env2, agent2)
+    portfolio3_value = update_portfolio(prices, returns, env3, agent3)
     
     csp.add_graph_output("portfolio1_value", portfolio1_value)
     csp.add_graph_output("portfolio2_value", portfolio2_value)
@@ -137,14 +138,13 @@ def portfolio_manager_graph():
     csp.add_graph_output("progress", progress_update)
 
 def run_simulation():
-    global current_step, is_training, best_portfolio, best_envs, best_agents
+    global current_step, is_training, best_env, best_agent
     
     # Reset global variables
     current_step = 0
     is_training = True
-    best_portfolio = None
-    best_envs = None
-    best_agents = None
+    best_env = None
+    best_agent = None
 
     results = csp.run(
         portfolio_manager_graph,
@@ -161,13 +161,13 @@ def run_simulation():
     best_value = max(train_value1, train_value2, train_value3)
     if best_value == train_value1:
         best_portfolio_name = "Portfolio 1"
-        best_portfolio, best_envs, best_agents = portfolio1, envs1, agents1
+        best_env, best_agent = env1, agent1
     elif best_value == train_value2:
         best_portfolio_name = "Portfolio 2"
-        best_portfolio, best_envs, best_agents = portfolio2, envs2, agents2
+        best_env, best_agent = env2, agent2
     else:
         best_portfolio_name = "Portfolio 3"
-        best_portfolio, best_envs, best_agents = portfolio3, envs3, agents3
+        best_env, best_agent = env3, agent3
     
     return results, best_portfolio_name
 
