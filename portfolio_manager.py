@@ -172,6 +172,7 @@ def plot_results(results, best_portfolio_name, sim_df, symbols):
         if portfolio_name == best_portfolio_name:
             plt.plot(timestamps[TRAINING_STEPS:], normalized_values[TRAINING_STEPS:], 
                      label=f"{portfolio_name} (Testing)", linewidth=2)
+    plt.savefig("Portfolio comparison")
 
     # Plot individual stock values
     for symbol in symbols:
