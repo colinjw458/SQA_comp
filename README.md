@@ -83,7 +83,7 @@ Follow these steps to set up and run the portfolio_manager.py file:
 ### Troubleshooting
 
 - If you encounter any "module not found" errors, ensure that all dependencies were installed correctly in step 3.
-- Make sure your Python version is compatible with the requirements. This project is typically tested with Python 3.7+.
+- Make sure your Python version is compatible with the requirements. This project is typically tested with Python 3.7-3.10.
 - If you face issues with the CSP library, you might need to install it separately or check for any specific installation instructions on its repository.
 
 ### Notes
