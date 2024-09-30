@@ -31,7 +31,7 @@ timestamps = sim_df["ts_event"].unique()
 # Initial balance for each portfolio
 INITIAL_BALANCE = 10000
 
-# Set the number of steps for training 
+# Set the number of steps for training use ~80% of data for training
 TRAINING_STEPS = 800 
 
 # Create three environments with random initial weights
@@ -56,7 +56,7 @@ for timestamp in timestamps:
     prices_data.append((timestamp, price_dict))
 
 total_steps = len(timestamps)
-progress_bar = tqdm(total=total_steps, desc="Simulation Progress", unit="step")
+progress_bar = tqdm(total=(total_steps*3 + 812), desc="Simulation Progress", unit="step")
 
 # Global variables
 current_step = 0
@@ -73,7 +73,7 @@ def update_portfolio(prices: ts[dict], env: PortfolioEnv, agent: DDPGAgent) -> t
         
         env.update_prices(price_dict)
         
-        if not env.all_prices_received():
+        if not env.is_initialized:
             return env.get_portfolio_value()
 
         state = env.get_state()
@@ -82,7 +82,6 @@ def update_portfolio(prices: ts[dict], env: PortfolioEnv, agent: DDPGAgent) -> t
         
         if is_training and current_step >= TRAINING_STEPS:
             is_training = False
-            logging.info(f"Training completed. Final portfolio value: {env.get_portfolio_value():.2f}")
         
         if is_training:
             agent.remember(state, action, reward, next_state, done)
@@ -158,12 +157,14 @@ def run_simulation():
     
     return results, best_portfolio_name
 
-def plot_results(results, best_portfolio_name):
-    plt.figure(figsize=(12, 6))
+
+def plot_results(results, best_portfolio_name, sim_df, symbols):
+    plt.figure(figsize=(15, 10))
     
+    # Plot portfolio values and individual stock performance
     for i, portfolio_name in enumerate(['Portfolio 1', 'Portfolio 2', 'Portfolio 3']):
         values = [v[1] for v in results[f"portfolio{i+1}_value"]]
-        normalized_values = [v / INITIAL_BALANCE for v in values]
+        normalized_values = [(v / INITIAL_BALANCE - 1) * 100 for v in values]  # Convert to percentage change
         
         plt.plot(timestamps[:TRAINING_STEPS], normalized_values[:TRAINING_STEPS], 
                  label=f"{portfolio_name} (Training)", alpha=0.7)
@@ -172,13 +173,37 @@ def plot_results(results, best_portfolio_name):
             plt.plot(timestamps[TRAINING_STEPS:], normalized_values[TRAINING_STEPS:], 
                      label=f"{portfolio_name} (Testing)", linewidth=2)
 
+    # Plot individual stock values
+    for symbol in symbols:
+        stock_data = sim_df[sim_df['symbol'] == symbol]
+        initial_price = stock_data['close'].iloc[0]
+        normalized_prices = [(price / initial_price - 1) * 100 for price in stock_data['close']]
+        plt.plot(stock_data['ts_event'], normalized_prices, label=symbol, linestyle='--', alpha=0.5)
+
     plt.axvline(x=timestamps[TRAINING_STEPS], color='r', linestyle='--', label='Train/Test Split')
 
-    plt.title("Portfolio Performance (Training and Testing Phases)")
+    plt.title("Portfolio and Stock Performance (Training and Testing Phases)")
     plt.xlabel("Time")
-    plt.ylabel("Normalized Portfolio Value")
-    plt.legend()
+    plt.ylabel("Percentage Change")
+    plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
     plt.grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+def plot_final_portfolio_composition(best_env):
+    portfolio_value = best_env.get_portfolio_value()
+    cash_percentage = (best_env.balance / portfolio_value) * 100
+    stock_percentages = {symbol: (best_env.shares[symbol] * best_env.last_known_prices[symbol] / portfolio_value) * 100 
+                         for symbol in best_env.symbols}
+
+    labels = ['Cash'] + list(stock_percentages.keys())
+    sizes = [cash_percentage] + list(stock_percentages.values())
+
+    plt.figure(figsize=(10, 10))
+    plt.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90)
+    plt.axis('equal')
+    plt.title(f"Final Portfolio Composition")
     plt.show()
 
 if __name__ == "__main__":
@@ -186,7 +211,8 @@ if __name__ == "__main__":
     
     progress_bar.close()
 
-    plot_results(results, best_portfolio_name)
+    plot_results(results, best_portfolio_name, sim_df, symbols)
+    plot_final_portfolio_composition(best_env)
 
     print(f"\nInitial Investment: ${INITIAL_BALANCE:.2f}")
     
@@ -207,3 +233,11 @@ if __name__ == "__main__":
     print(f"Sharpe Ratio (Testing Phase): {sharpe_ratio:.4f}")
 
     print(f"\nBest performing portfolio selected for testing: {best_portfolio_name}")
+
+    # Print final portfolio composition
+    print("\nFinal Portfolio Composition:")
+    portfolio_value = best_env.get_portfolio_value()
+    print(f"Cash: ${best_env.balance:.2f} ({(best_env.balance / portfolio_value) * 100:.2f}%)")
+    for symbol in best_env.symbols:
+        stock_value = best_env.shares[symbol] * best_env.last_known_prices[symbol]
+        print(f"{symbol}: ${stock_value:.2f} ({(stock_value / portfolio_value) * 100:.2f}%)")

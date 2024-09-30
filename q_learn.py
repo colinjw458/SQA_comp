@@ -13,6 +13,7 @@ class PortfolioEnv:
         self.symbols = symbols
         self.num_stocks = len(symbols)
         self.last_known_prices = {symbol: None for symbol in symbols}
+        self.is_initialized = False
         self.reset()
 
     def reset(self):
@@ -20,20 +21,24 @@ class PortfolioEnv:
         self.shares = {symbol: 0 for symbol in self.symbols}
         self.portfolio_value = self.initial_balance
         self.latest_prices = {symbol: None for symbol in self.symbols}
+        self.is_initialized = False
         return self.get_state()
 
     def get_state(self):
+        if not self.is_initialized:
+            return np.zeros(2 * len(self.symbols) + 1)
+        
         state = [self.balance / self.initial_balance]  # Normalized cash balance
         for symbol in self.symbols:
             price = self.last_known_prices[symbol]
-            if price is not None:
-                state.append(price / 100)  # Normalized price
-                state.append(self.shares[symbol] * price / self.initial_balance)  # Normalized position value
-            else:
-                state.extend([0, 0])  # If no price is available yet, use zeros
+            state.append(price / 100)  # Normalized price
+            state.append(self.shares[symbol] * price / self.initial_balance)  # Normalized position value
         return np.array(state)
 
     def step(self, action):
+        if not self.is_initialized:
+            return self.get_state(), 0, False, {}
+
         total_portfolio_value = self.balance + sum(self.shares[s] * self.last_known_prices[s] 
                                                    for s in self.symbols if self.last_known_prices[s] is not None)
         
@@ -68,19 +73,71 @@ class PortfolioEnv:
             if price is not None and not np.isnan(price):
                 self.last_known_prices[symbol] = price
                 self.latest_prices[symbol] = price
-            elif symbol in self.last_known_prices:
-                self.latest_prices[symbol] = self.last_known_prices[symbol]
         
-        missing_prices = [symbol for symbol, price in self.last_known_prices.items() if price is None]
-        if missing_prices:
-            logging.info(f"Still missing prices for: {', '.join(missing_prices)}")
+        if not self.is_initialized and all(price is not None for price in self.last_known_prices.values()):
+            self.initialize_portfolio()
+
+    def initialize_portfolio(self):
+        logging.info("Initializing portfolio...")
+        available_symbols = [symbol for symbol, price in self.last_known_prices.items() if price is not None]
+        
+        if not available_symbols:
+            logging.error("No prices available for initialization. Cannot proceed.")
+            return
+
+        # Generate random weights for available stocks
+        weights = np.random.random(len(available_symbols))
+        weights /= weights.sum()
+
+        max_weight = 0.45
+        iterations = 0
+        max_iterations = 1000  # Prevent infinite loop
+
+        while np.any(weights > max_weight) and iterations < max_iterations:
+            excess = weights[weights > max_weight] - max_weight
+            weights[weights > max_weight] = max_weight
+            
+            # Distribute excess to weights below max_weight
+            below_max = weights < max_weight
+            if np.sum(below_max) > 0:
+                weights[below_max] += excess.sum() * weights[below_max] / weights[below_max].sum()
+            else:
+                # If all weights are at max_weight, distribute evenly
+                weights[weights == max_weight] += excess.sum() / np.sum(weights == max_weight)
+            
+            iterations += 1
+
+        if iterations == max_iterations:
+            logging.warning("Max iterations reached in weight adjustment. Results may not be optimal.")
+
+        # Normalize weights to sum to 1
+        weights /= weights.sum()
+
+        # Calculate shares and update balance
+        self.balance = self.initial_balance
+        for i, symbol in enumerate(available_symbols):
+            allocation = self.initial_balance * weights[i]
+            shares_to_buy = allocation / self.last_known_prices[symbol]
+            self.shares[symbol] = shares_to_buy
+            self.balance -= shares_to_buy * self.last_known_prices[symbol]
+
+        # Ensure the total value remains equal to the initial balance
+        total_value = self.balance + sum(self.shares[s] * self.last_known_prices[s] for s in available_symbols)
+        if abs(total_value - self.initial_balance) > 0.01:  # Allow for small floating-point discrepancies
+            logging.warning(f"Portfolio initialization discrepancy: Total value {total_value} does not match initial balance {self.initial_balance}")
+
+        self.is_initialized = True
+        logging.info("Portfolio initialized successfully.")
+        logging.info(f"Final weights: {dict(zip(available_symbols, weights))}")
 
     def get_portfolio_value(self):
-        return self.balance + sum(self.shares[s] * self.last_known_prices[s] 
-                                  for s in self.symbols if self.last_known_prices[s] is not None)
+        if not self.is_initialized:
+            return self.initial_balance
+        return self.balance + sum(self.shares[s] * self.last_known_prices[s] for s in self.symbols)
 
     def all_prices_received(self):
-        return all(price is not None for price in self.last_known_prices.values())
+        return self.is_initialized
+
 
 class OUActionNoise:
     def __init__(self, mean, std_deviation, theta=0.15, dt=1e-2, x_initial=None):
@@ -160,7 +217,7 @@ class DDPGAgent:
     def act(self, state):
         state = np.reshape(state, [1, self.state_size])
         state = np.nan_to_num(state, nan=0.0)  # Replace NaN with 0
-        action = self.actor.predict(state)[0]
+        action = self.actor.predict(state, verbose=0)[0]
         action += self.noise()
         return np.clip(action, -1, 1)
 
