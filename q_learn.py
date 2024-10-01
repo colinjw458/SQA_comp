@@ -3,217 +3,275 @@ import tensorflow as tf
 from tensorflow import keras
 from collections import deque
 import random
-import pandas as pd
+import logging
 
-# Q-learning parameters
-GAMMA = 0.95
-EPSILON = 1.0
-EPSILON_DECAY = 0.999
-EPSILON_MIN = 0.05
-LEARNING_RATE = 0.005
-MEMORY_SIZE = 20000
-BATCH_SIZE = 64
-
-
-# Portfolio parameters
-N_ACTIONS = 5  # Sell All, Sell Half, Hold, Buy Half, Buy All
-
+logging.basicConfig(level=logging.INFO)
 
 class PortfolioEnv:
-    def __init__(self, data, initial_balance, symbols):
-        self.data = data
+    def __init__(self, initial_balance, symbols):
         self.initial_balance = initial_balance
         self.symbols = symbols
-        self.transaction_cost = 0.000  # transaction cost if you want to see how poorly the agent performs with it
-        self.latest_prices = {symbol: None for symbol in symbols}
+        self.num_stocks = len(symbols)
+        self.last_known_prices = {symbol: None for symbol in symbols}
+        self.is_initialized = False
         self.reset()
 
     def reset(self):
         self.balance = self.initial_balance
         self.shares = {symbol: 0 for symbol in self.symbols}
-        self.current_step = 0
-        self.portfolio_values = [self.initial_balance]
-        self.initialized = False
-        self.previous_portfolio_value = self.initial_balance
+        self.portfolio_value = self.initial_balance
         self.latest_prices = {symbol: None for symbol in self.symbols}
-        return self._get_state()
+        self.is_initialized = False
+        return self.get_state()
 
-    def initialize_portfolio(self, initial_prices):
-        if not self.initialized:
-            valid_prices = [(symbol, price) for symbol, price in zip(self.symbols, initial_prices) if not np.isnan(price)]
-            if len(valid_prices) > 0:
-                weights = np.random.dirichlet(np.ones(len(valid_prices)))
-                for i, (symbol, price) in enumerate(valid_prices):
-                    self.latest_prices[symbol] = price
-                    weight = weights[i]
-                    shares_to_buy = int((weight * self.initial_balance) / price)
-                    cost = shares_to_buy * price * (1 + self.transaction_cost)
-                    if cost <= self.balance:
-                        self.shares[symbol] = shares_to_buy
-                        self.balance -= cost
-            self.initialized = True
-
-    def step(self, action, current_prices, current_returns):
-        if not self.initialized:
-            self.initialize_portfolio(current_prices)
-            return self._get_state(current_prices, current_returns), 0, False
-
-        if self.current_step >= len(self.data) // len(self.symbols) - 1:
-            return self._get_state(current_prices, current_returns), 0, True
+    def get_state(self):
+        if not self.is_initialized:
+            return np.zeros(2 * len(self.symbols) + 1)
         
-        for i, symbol in enumerate(self.symbols):
-            if not np.isnan(current_prices[i]):
-                self.latest_prices[symbol] = current_prices[i]
-            
-            if self.latest_prices[symbol] is None:
-                continue  # Skip this stock if we don't have any price data yet
-            
-            price = self.latest_prices[symbol]
-            if action[i] == 0:  # Sell All
-                sell_value = self.shares[symbol] * price
-                self.balance += sell_value * (1 - self.transaction_cost)
-                self.shares[symbol] = 0
-            elif action[i] == 1:  # Sell Half
-                shares_to_sell = self.shares[symbol] // 2
-                sell_value = shares_to_sell * price
-                self.balance += sell_value * (1 - self.transaction_cost)
-                self.shares[symbol] -= shares_to_sell
-            elif action[i] == 3:  # Buy Half
-                available_balance = self.balance // (2 * len(self.symbols))
-                shares_to_buy = int(available_balance / price)
-                buy_cost = shares_to_buy * price * (1 + self.transaction_cost)
-                if buy_cost <= self.balance:
-                    self.shares[symbol] += shares_to_buy
-                    self.balance -= buy_cost
-            elif action[i] == 4:  # Buy All
-                available_balance = self.balance // len(self.symbols)
-                shares_to_buy = int(available_balance / price)
-                buy_cost = shares_to_buy * price * (1 + self.transaction_cost)
-                if buy_cost <= self.balance:
-                    self.shares[symbol] += shares_to_buy
-                    self.balance -= buy_cost
-
-        self.current_step += 1
-        next_state = self._get_state(current_prices, current_returns)
-        reward = self._calculate_reward()
-        done = self.current_step == len(self.data) // len(self.symbols) - 1
-        
-        current_value = self.get_portfolio_value()
-        self.portfolio_values.append(current_value)
-        
-        return next_state, reward, done
-
-    def _get_state(self, current_prices=None, current_returns=None):
-        if not self.initialized:
-            return np.zeros(3 * len(self.symbols) + 1)
-
-        if current_prices is None or current_returns is None:
-            current_prices = []
-            current_returns = []
-            for symbol in self.symbols:
-                symbol_data = self.data[self.data['symbol'] == symbol]
-                if self.current_step < len(symbol_data):
-                    price = symbol_data['close'].iloc[self.current_step]
-                    if not np.isnan(price):
-                        self.latest_prices[symbol] = price
-                    current_prices.append(self.latest_prices[symbol])
-                    if self.current_step > 0:
-                        current_returns.append(symbol_data['returns'].iloc[self.current_step])
-                    else:
-                        current_returns.append(0)
-                else:
-                    current_prices.append(self.latest_prices[symbol])
-                    current_returns.append(0)
-
-        state = []
-        for i, symbol in enumerate(self.symbols):
-            price = self.latest_prices[symbol]
-            state.extend([
-                self.balance / self.initial_balance,
-                self.shares[symbol] * price / self.initial_balance if price is not None else 0,
-                current_returns[i] if not np.isnan(current_returns[i]) else 0,
-            ])
-        state.append(self._calculate_sharpe_ratio())
+        state = [self.balance / self.initial_balance]  # Normalized cash balance
+        for symbol in self.symbols:
+            price = self.last_known_prices[symbol]
+            state.append(price / 100)  # Normalized price
+            state.append(self.shares[symbol] * price / self.initial_balance)  # Normalized position value
         return np.array(state)
 
-    def _calculate_reward(self):
-        current_value = self.get_portfolio_value()
-        portfolio_return = (current_value - self.previous_portfolio_value) / self.previous_portfolio_value
-        sharpe_ratio = self._calculate_sharpe_ratio()
-        
-        reward = portfolio_return + 0.5 * sharpe_ratio
+    def step(self, action):
+        if not self.is_initialized:
+            return self.get_state(), 0, False, {}
 
-        if reward < 0:
-            reward *= 1.5  # Penalize losses more severely
+        total_portfolio_value = self.balance + sum(self.shares[s] * self.last_known_prices[s] 
+                                                   for s in self.symbols if self.last_known_prices[s] is not None)
         
-        self.previous_portfolio_value = current_value
-        return reward
+        for i, symbol in enumerate(self.symbols):
+            if self.last_known_prices[symbol] is None:
+                continue  # Skip this stock if we don't have any price data yet
 
-    def _calculate_sharpe_ratio(self):
-        if len(self.portfolio_values) < 2:
-            return 0
+            desired_value = total_portfolio_value * (action[i] + 1) / 2  # Convert from [-1, 1] to [0, 1]
+            current_value = self.shares[symbol] * self.last_known_prices[symbol]
+            value_difference = desired_value - current_value
+
+            if value_difference > 0:  # Buy
+                shares_to_buy = value_difference / self.last_known_prices[symbol]
+                cost = shares_to_buy * self.last_known_prices[symbol]
+                if cost <= self.balance:
+                    self.shares[symbol] += shares_to_buy
+                    self.balance -= cost
+            elif value_difference < 0:  # Sell
+                shares_to_sell = -value_difference / self.last_known_prices[symbol]
+                if shares_to_sell <= self.shares[symbol]:  # Ensure we don't sell more than we have
+                    self.shares[symbol] -= shares_to_sell
+                    self.balance += -value_difference
+
+        new_portfolio_value = self.get_portfolio_value()
+        reward = (new_portfolio_value - self.portfolio_value) / self.portfolio_value if self.portfolio_value != 0 else 0
+        self.portfolio_value = new_portfolio_value
+
+        return self.get_state(), reward, False, {}
+
+    def update_prices(self, price_dict):
+        for symbol, price in price_dict.items():
+            if price is not None and not np.isnan(price):
+                self.last_known_prices[symbol] = price
+                self.latest_prices[symbol] = price
         
-        returns = np.diff(self.portfolio_values) / self.portfolio_values[:-1]
-        if len(returns) < 2:
-            return 0
+        if not self.is_initialized and all(price is not None for price in self.last_known_prices.values()):
+            self.initialize_portfolio()
+
+    def initialize_portfolio(self):
+        logging.info("Initializing portfolio...")
+        available_symbols = [symbol for symbol, price in self.last_known_prices.items() if price is not None]
         
-        average_return = np.mean(returns)
-        return_std = np.std(returns)
-        
-        if return_std == 0:
-            return 0
-        
-        sharpe_ratio = np.sqrt(252) * average_return / return_std  # Annualized Sharpe ratio
-        return sharpe_ratio
+        if not available_symbols:
+            logging.error("No prices available for initialization. Cannot proceed.")
+            return
+
+        # Generate random weights for available stocks
+        weights = np.random.random(len(available_symbols))
+        weights /= weights.sum()
+
+        max_weight = 0.45
+        iterations = 0
+        max_iterations = 1000  # Prevent infinite loop
+
+        while np.any(weights > max_weight) and iterations < max_iterations:
+            excess = weights[weights > max_weight] - max_weight
+            weights[weights > max_weight] = max_weight
+            
+            # Distribute excess to weights below max_weight
+            below_max = weights < max_weight
+            if np.sum(below_max) > 0:
+                weights[below_max] += excess.sum() * weights[below_max] / weights[below_max].sum()
+            else:
+                # If all weights are at max_weight, distribute evenly
+                weights[weights == max_weight] += excess.sum() / np.sum(weights == max_weight)
+            
+            iterations += 1
+
+        if iterations == max_iterations:
+            logging.warning("Max iterations reached in weight adjustment. Results may not be optimal.")
+
+        # Normalize weights to sum to 1
+        weights /= weights.sum()
+
+        # Calculate shares and update balance
+        self.balance = self.initial_balance
+        for i, symbol in enumerate(available_symbols):
+            allocation = self.initial_balance * weights[i]
+            shares_to_buy = allocation / self.last_known_prices[symbol]
+            self.shares[symbol] = shares_to_buy
+            self.balance -= shares_to_buy * self.last_known_prices[symbol]
+
+        # Ensure the total value remains equal to the initial balance
+        total_value = self.balance + sum(self.shares[s] * self.last_known_prices[s] for s in available_symbols)
+        if abs(total_value - self.initial_balance) > 0.01:  # Allow for small floating-point discrepancies
+            logging.warning(f"Portfolio initialization discrepancy: Total value {total_value} does not match initial balance {self.initial_balance}")
+
+        self.is_initialized = True
+        logging.info("Portfolio initialized successfully.")
+        logging.info(f"Final weights: {dict(zip(available_symbols, weights))}")
 
     def get_portfolio_value(self):
-        return self.balance + sum(self.shares[symbol] * price 
-                                  for symbol, price in self.latest_prices.items() 
-                                  if price is not None)
+        if not self.is_initialized:
+            return self.initial_balance
+        return self.balance + sum(self.shares[s] * self.last_known_prices[s] for s in self.symbols)
 
-    def update_prices(self, current_prices):
-        for i, symbol in enumerate(self.symbols):
-            if not np.isnan(current_prices[i]):
-                self.latest_prices[symbol] = current_prices[i]
+    def all_prices_received(self):
+        return self.is_initialized
 
-class DQNAgent:
-    def __init__(self, state_size, action_size, n_stocks):
+
+class OUActionNoise:
+    def __init__(self, mean, std_deviation, theta=0.15, dt=1e-2, x_initial=None):
+        self.theta = theta
+        self.mean = mean
+        self.std_dev = std_deviation
+        self.dt = dt
+        self.x_initial = x_initial
+        self.reset()
+
+    def __call__(self):
+        x = (
+            self.x_prev
+            + self.theta * (self.mean - self.x_prev) * self.dt
+            + self.std_dev * np.sqrt(self.dt) * np.random.normal(size=self.mean.shape)
+        )
+        self.x_prev = x
+        return x
+
+    def reset(self):
+        if self.x_initial is not None:
+            self.x_prev = self.x_initial
+        else:
+            self.x_prev = np.zeros_like(self.mean)
+
+class DDPGAgent:
+    def __init__(self, state_size, action_size, hidden_size=64):
         self.state_size = state_size
         self.action_size = action_size
-        self.n_stocks = n_stocks
-        self.memory = deque(maxlen=MEMORY_SIZE)
-        self.epsilon = EPSILON
-        self.model = self._build_model()
+        
+        self.gamma = 0.99
+        self.tau = 0.001
+        self.learning_rate = 0.0001  # Reduced learning rate
+        
+        self.actor = self.build_actor(hidden_size)
+        self.critic = self.build_critic(hidden_size)
+        self.target_actor = self.build_actor(hidden_size)
+        self.target_critic = self.build_critic(hidden_size)
+        
+        self.target_actor.set_weights(self.actor.get_weights())
+        self.target_critic.set_weights(self.critic.get_weights())
+        
+        self.noise = OUActionNoise(mean=np.zeros(action_size), std_deviation=float(0.1) * np.ones(action_size))  # Reduced noise
+        
+        self.memory = deque(maxlen=100000)
+        self.batch_size = 64
 
-    def _build_model(self):
-        model = keras.Sequential([
-            keras.layers.Input(shape=(self.state_size,)),
-            keras.layers.Dense(128, activation='relu'),
-            keras.layers.Dense(128, activation='relu'),
-            keras.layers.Dense(self.action_size * self.n_stocks, activation='linear')
-        ])
-        model.compile(loss='mse', optimizer=keras.optimizers.Adam(learning_rate=LEARNING_RATE))
-        return model
+        self.actor_optimizer = keras.optimizers.Adam(self.learning_rate)
+        self.critic_optimizer = keras.optimizers.Adam(self.learning_rate)
+
+    def build_actor(self, hidden_size):
+        inputs = keras.layers.Input(shape=(self.state_size,))
+        x = keras.layers.Dense(hidden_size, activation="relu")(inputs)
+        x = keras.layers.Dense(hidden_size, activation="relu")(x)
+        outputs = keras.layers.Dense(self.action_size, activation="tanh")(x)
+        return keras.Model(inputs, outputs)
+
+    def build_critic(self, hidden_size):
+        state_input = keras.layers.Input(shape=(self.state_size,))
+        state_out = keras.layers.Dense(16, activation="relu")(state_input)
+        state_out = keras.layers.Dense(32, activation="relu")(state_out)
+
+        action_input = keras.layers.Input(shape=(self.action_size,))
+        action_out = keras.layers.Dense(32, activation="relu")(action_input)
+
+        concat = keras.layers.Concatenate()([state_out, action_out])
+
+        x = keras.layers.Dense(hidden_size, activation="relu")(concat)
+        x = keras.layers.Dense(hidden_size, activation="relu")(x)
+        outputs = keras.layers.Dense(1)(x)
+
+        return keras.Model([state_input, action_input], outputs)
 
     def remember(self, state, action, reward, next_state, done):
         self.memory.append((state, action, reward, next_state, done))
 
     def act(self, state):
-        if np.random.rand() <= self.epsilon:
-            return np.random.randint(self.action_size, size=self.n_stocks)
-        act_values = self.model.predict(state.reshape(1, -1), verbose=0)
-        return np.array([np.argmax(act_values[0][i*self.action_size:(i+1)*self.action_size]) for i in range(self.n_stocks)])
+        state = np.reshape(state, [1, self.state_size])
+        state = np.nan_to_num(state, nan=0.0)  # Replace NaN with 0
+        action = self.actor.predict(state, verbose=0)[0]
+        action += self.noise()
+        return np.clip(action, -1, 1)
 
-    def replay(self, batch_size):
-        minibatch = random.sample(self.memory, batch_size)
-        for state, action, reward, next_state, done in minibatch:
-            target = reward
-            if not done:
-                next_q_values = self.model.predict(next_state.reshape(1, -1), verbose=0)[0]
-                target = reward + GAMMA * sum([np.amax(next_q_values[i*self.action_size:(i+1)*self.action_size]) for i in range(self.n_stocks)])
-            target_f = self.model.predict(state.reshape(1, -1), verbose=0)
-            for i in range(self.n_stocks):
-                target_f[0][i*self.action_size + action[i]] = target
-            self.model.fit(state.reshape(1, -1), target_f, epochs=1, verbose=0)
-        if self.epsilon > EPSILON_MIN:
-            self.epsilon *= EPSILON_DECAY
+    def train(self):
+        if len(self.memory) < self.batch_size:
+            return
+
+        indices = np.random.choice(len(self.memory), size=self.batch_size, replace=False)
+        states, actions, rewards, next_states, dones = zip(*[self.memory[idx] for idx in indices])
+
+        states = np.array(states)
+        actions = np.array(actions)
+        rewards = np.array(rewards)
+        next_states = np.array(next_states)
+        dones = np.array(dones)
+
+        # Replace NaN values with 0 and convert to tensors
+        states = tf.convert_to_tensor(np.nan_to_num(states, nan=0.0), dtype=tf.float32)
+        actions = tf.convert_to_tensor(actions, dtype=tf.float32)
+        rewards = tf.convert_to_tensor(rewards, dtype=tf.float32)
+        next_states = tf.convert_to_tensor(np.nan_to_num(next_states, nan=0.0), dtype=tf.float32)
+        dones = tf.convert_to_tensor(dones, dtype=tf.float32)
+
+        with tf.GradientTape() as tape:
+            target_actions = self.target_actor(next_states)
+            target_q_values = self.target_critic([next_states, target_actions])
+            target_q = rewards + self.gamma * target_q_values * (1 - dones)
+            critic_value = self.critic([states, actions])
+            critic_loss = tf.reduce_mean(tf.square(target_q - critic_value))
+
+        critic_grad = tape.gradient(critic_loss, self.critic.trainable_variables)
+        self.critic_optimizer.apply_gradients(zip(critic_grad, self.critic.trainable_variables))
+
+        with tf.GradientTape() as tape:
+            actions = self.actor(states)
+            critic_value = self.critic([states, actions])
+            actor_loss = -tf.reduce_mean(critic_value)
+
+        actor_grad = tape.gradient(actor_loss, self.actor.trainable_variables)
+        self.actor_optimizer.apply_gradients(zip(actor_grad, self.actor.trainable_variables))
+
+        self.update_target(self.target_actor.variables, self.actor.variables)
+        self.update_target(self.target_critic.variables, self.critic.variables)
+
+    def update_target(self, target_weights, weights):
+        for (a, b) in zip(target_weights, weights):
+            a.assign(self.tau * b + (1 - self.tau) * a)
+
+    def save(self, filename):
+        self.actor.save(filename + "_actor.h5")
+        self.critic.save(filename + "_critic.h5")
+
+    def load(self, filename):
+        self.actor = keras.models.load_model(filename + "_actor.h5")
+        self.critic = keras.models.load_model(filename + "_critic.h5")
+        self.target_actor = keras.models.load_model(filename + "_actor.h5")
+        self.target_critic = keras.models.load_model(filename + "_critic.h5")
